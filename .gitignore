@@ -10,3 +10,6 @@ wheels/
 .venv
 
 data/
+
+CLAUDE.md
+EMBEDDING_GENERATION.md
