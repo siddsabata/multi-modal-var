@@ -88,7 +88,7 @@ def generate_protein_embeddings(
     print("\nLoading ProGen2 base pretrained model...")
     alphabet = Alphabet()
     model_path = os.path.join(pretrained_model_path, pretrained_model_name)
-    model = ProGenForCausalLM.from_pretrained(model_path).to(device)
+    model = ProGenForCausalLM.from_pretrained(model_path, local_files_only=True).to(device)
     model.eval()
     print(f"Model loaded from {model_path}")
     print(f"Embedding dimension: {model.config.n_embd}")

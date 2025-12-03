@@ -10,9 +10,9 @@ Saves embeddings to npz file with indices matching the parquet file.
 import argparse
 import os
 import numpy as np
-import pandas as pd
 import torch
 from tqdm import tqdm
+import pandas as pd
 
 try:
     from evo2 import Evo2
@@ -56,7 +56,7 @@ def get_dna_embedding(model, dna_seq, layer_name, device='cuda'):
         # Mean pool across sequence length
         embedding = hidden_states.mean(dim=1).squeeze(0)  # [dim]
 
-    return embedding.cpu().numpy()
+    return embedding.float().cpu().numpy()
 
 
 def generate_dna_embeddings(
