@@ -18,7 +18,7 @@ from progen.model import ProGenForCausalLM
 from progen.progen_vocab import Alphabet
 
 
-def get_protein_embedding(model, alphabet, protein_seq, device='cuda', max_length=1024):
+def get_protein_embedding(model, alphabet, protein_seq, device='cuda', max_length=2048):
     """
     Extract embedding from ProGen2 for a single protein sequence.
 
@@ -27,18 +27,21 @@ def get_protein_embedding(model, alphabet, protein_seq, device='cuda', max_lengt
         alphabet: ProGen alphabet for tokenization
         protein_seq: Protein sequence string
         device: Device to run on
-        max_length: Maximum sequence length (truncate if longer)
+        max_length: Maximum total tokens INCLUDING BOS/EOS (model supports 2048)
 
     Returns:
         embedding: Mean-pooled embedding vector [embedding_dim]
-    """
-    # Tokenize the protein sequence
-    # Truncate if too long to avoid memory issues
-    if len(protein_seq) > max_length:
-        protein_seq = protein_seq[:max_length]
 
-    # Encode with BOS and EOS tokens
+    Raises:
+        ValueError: If sequence is longer than max_length after tokenization
+    """
+    # Encode with BOS and EOS tokens first
     tokens = alphabet.encode_line(protein_seq, prepend_bos=True, append_eos=True).long()
+
+    # Check if sequence is too long (tokens already include BOS and EOS)
+    if tokens.size(0) > max_length:
+        raise ValueError(f"Sequence too long: {tokens.size(0)} tokens (max: {max_length})")
+
     tokens = tokens.unsqueeze(0).to(device)  # [1, L]
 
     # Get embeddings from the transformer
@@ -103,6 +106,7 @@ def generate_protein_embeddings(
     # Process in batches to show progress
     num_batches = (len(df) + batch_size - 1) // batch_size
 
+    failed_indices = []
     for batch_idx in tqdm(range(num_batches), desc="Processing batches"):
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(df))
@@ -110,16 +114,23 @@ def generate_protein_embeddings(
         for i in range(start_idx, end_idx):
             row = df.iloc[i]
 
-            # Get embeddings for wild-type and mutant proteins
-            wt_embedding = get_protein_embedding(
-                model, alphabet, row['prot_wt'], device, max_length
-            )
-            mut_embedding = get_protein_embedding(
-                model, alphabet, row['prot_mut'], device, max_length
-            )
+            try:
+                # Get embeddings for wild-type and mutant proteins
+                wt_embedding = get_protein_embedding(
+                    model, alphabet, row['prot_wt'], device, max_length
+                )
+                mut_embedding = get_protein_embedding(
+                    model, alphabet, row['prot_mut'], device, max_length
+                )
 
-            # Compute delta embedding
-            delta_embeddings[i] = wt_embedding - mut_embedding
+                # Compute delta embedding
+                delta_embeddings[i] = wt_embedding - mut_embedding
+
+            except Exception as e:
+                # Keep as zeros for failed embeddings
+                failed_indices.append(i)
+                print(f"\nWarning: Failed to process SNV at index {i} (variant_id={row['variant_id']}): {e}")
+                continue
 
     # Save to npz file
     print(f"\nSaving embeddings to {output_path}...")
@@ -128,11 +139,17 @@ def generate_protein_embeddings(
         delta_embeddings=delta_embeddings,
         variant_ids=variant_ids,
         embedding_dim=embedding_dim,
-        model_name=pretrained_model_name
+        model_name=pretrained_model_name,
+        failed_indices=np.array(failed_indices) if failed_indices else np.array([])
     )
     print("Done!")
     print(f"Saved {len(delta_embeddings)} protein delta embeddings")
     print(f"Shape: {delta_embeddings.shape}")
+    if failed_indices:
+        print(f"\nWarning: {len(failed_indices)} SNVs failed (kept as zeros)")
+        print(f"Failed indices: {failed_indices}")
+    else:
+        print(f"\nAll {len(delta_embeddings)} embeddings generated successfully!")
 
 
 def main():
@@ -172,8 +189,8 @@ def main():
     parser.add_argument(
         "--max_length",
         type=int,
-        default=1024,
-        help="Maximum protein sequence length (truncate if longer)"
+        default=2048,
+        help="Maximum total tokens INCLUDING BOS/EOS (ProGen2 supports 2048)"
     )
     parser.add_argument(
         "--device",

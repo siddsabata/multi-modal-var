@@ -70,6 +70,15 @@ def load_and_check_npz(filepath, name="Embeddings"):
         if 'layer_name' in data:
             print(f"  - Layer name: {data['layer_name']}")
 
+        if 'failed_indices' in data:
+            failed = data['failed_indices']
+            if len(failed) > 0:
+                print(f"\nFailed Embeddings:")
+                print(f"  - Count: {len(failed)}")
+                print(f"  - Indices: {failed.tolist()}")
+            else:
+                print(f"\n✓ No failed embeddings!")
+
         return data
 
     except FileNotFoundError:
