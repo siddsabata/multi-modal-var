@@ -13,3 +13,6 @@ data/
 
 CLAUDE.md
 EMBEDDING_GENERATION.md
+
+snvs_full.parquet
+snvs_filtered.parquet
