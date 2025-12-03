@@ -1,4 +1,4 @@
-import pandas as pd
+import polars as pl
 import pysam
 import re
 import requests
@@ -29,11 +29,12 @@ AAS = {
     "Pyl": "O",
 }
 
-def get_dna_window(row, fa, flank=512):
-    chrom = str(row["Chromosome"])  # e.g. '15'
-    pos = int(row["PositionVCF"])  # 1-based
-    ref = row["ReferenceAlleleVCF"]  # 'G'
-    alt = row["AlternateAlleleVCF"]  # 'A'
+
+def get_dna_window(row: dict, fa: pysam.FastaFile, flank: int = 512):
+    chrom = str(row["Chromosome"])          # e.g. '15'
+    pos = int(row["PositionVCF"])           # 1-based
+    ref = str(row["ReferenceAlleleVCF"])    # 'G'
+    alt = str(row["AlternateAlleleVCF"])    # 'A'
 
     start = pos - flank
     end = pos + flank
@@ -49,11 +50,12 @@ def get_dna_window(row, fa, flank=512):
         )
 
     offset = flank  # position of variant within the window
-    alt_seq = wt_seq[:offset] + alt + wt_seq[offset + 1 :]
+    alt_seq = wt_seq[:offset] + alt + wt_seq[offset + 1:]
 
     return wt_seq, alt_seq
 
-def get_uniprot_acc(other_ids: str):
+
+def get_uniprot_acc(other_ids: str | None):
     m = re.search(r"UniProtKB:([A-Z0-9]+)", str(other_ids))
     return m.group(1) if m else None
 
@@ -63,7 +65,7 @@ def fetch_uniprot_seq(acc: str) -> str:
     r = requests.get(url)
     r.raise_for_status()
     lines = r.text.splitlines()
-    return "".join(l.strip() for l in lines if not l.startswith(">"))
+    return "".join(l.strip() for l in lines if not l.startswith(">>") and not l.startswith(">"))
 
 
 def parse_protein_hgvs(name: str):
@@ -78,7 +80,7 @@ def parse_protein_hgvs(name: str):
     return pos, ref1, alt1
 
 
-def get_protein_wt_mut(row):
+def get_protein_wt_mut(row: dict):
     acc = get_uniprot_acc(row["OtherIDs"])
     if acc is None:
         raise ValueError("No UniProt accession found in OtherIDs")
@@ -94,10 +96,8 @@ def get_protein_wt_mut(row):
     prot_mut = prot_wt[: pos - 1] + alt_aa + prot_wt[pos:]
     return prot_wt, prot_mut
 
-# df = your full variant_summary dataframe
 
-
-def process_variant_row(row, fa, flank=512):
+def process_variant_row(row: dict, fa: pysam.FastaFile, flank: int = 512):
     """
     Try to build everything we need for one SNV row.
     Return a dict if successful, or None if anything fails.
@@ -120,9 +120,9 @@ def process_variant_row(row, fa, flank=512):
         "variant_id": int(row["VariationID"]),
         "chrom": str(row["Chromosome"]),
         "pos": int(row["PositionVCF"]),
-        "ref": row["ReferenceAlleleVCF"],
-        "alt": row["AlternateAlleleVCF"],
-        "gene_symbol": row["GeneSymbol"],
+        "ref": str(row["ReferenceAlleleVCF"]),
+        "alt": str(row["AlternateAlleleVCF"]),
+        "gene_symbol": str(row["GeneSymbol"]),
         "wt_dna": wt_dna,
         "alt_dna": alt_dna,
         "prot_wt": prot_wt,
@@ -131,54 +131,55 @@ def process_variant_row(row, fa, flank=512):
     }
 
 
-def build_snv_dataset(df, fa, flank=512):
+def build_snv_dataset(df: pl.DataFrame, fa: pysam.FastaFile, flank: int = 512) -> pl.DataFrame:
     """
     Go over all rows, keep only SNVs where both DNA + protein processing work.
-    Returns a clean DataFrame ready for embedding.
+    Returns a clean Polars DataFrame ready for embedding.
     """
     records = []
 
-    for _, row in df.iterrows():
-        # Only single nucleotide variants
+    # iter_rows(named=True) gives dict-like rows
+    for row in df.iter_rows(named=True):
+        # Only single nucleotide variants (df is probably already filtered, but keep this guard)
         if row["Type"] != "single nucleotide variant":
             continue
 
-        rec = process_variant_row(row, fa = fa, flank=flank)
+        rec = process_variant_row(row, fa=fa, flank=flank)
         if rec is not None:
             records.append(rec)
 
-    return pd.DataFrame.from_records(records)
+    if not records:
+        return pl.DataFrame()  # empty
+
+    return pl.DataFrame(records)
+
 
 def main():
-    # read csv
-    print("reading csv")
-    snv = pd.read_csv(
-        "data/variant_summary.txt",
-        sep="\t",
-        dtype=str,
-        low_memory=False,
-    ).query("Type == 'single nucleotide variant'")
-
-    # temp subset 
-    snv = snv.iloc[:200]
+    # read TSV via Polars
+    print("reading variant_summary.txt with Polars")
+    snv = (
+        pl.read_csv(
+            "data/variant_summary.txt",
+            separator="\t",
+            ignore_errors=True,  # in case of some weird lines
+        )
+        .filter(pl.col("Type") == "single nucleotide variant")
+    )
 
     print("loading fasta")
-    # grab fasta 
-    fa = pysam.FastaFile("data/GRCh38.fa")
+    fa = pysam.FastaFile("data/GRCh38.fa")  # or GRCh37.fa, depending on your assembly
 
-    print("building dataset")
-    # build dataset 
+    print("building dataset (DNA + protein)")
     snv_dna_aa = build_snv_dataset(snv, fa, flank=512)
 
-    print("df info: " + str(snv_dna_aa.shape))
+    print("df shape:", snv_dna_aa.shape)
 
-    print("saving to parquet")
-    snv_dna_aa.to_parquet(
-    "snvs.parquet",
-    engine="pyarrow",
-    compression="snappy",    # or "snappy" if you want faster I/O
-    index=False
+    print("saving to parquet with snappy compression")
+    snv_dna_aa.write_parquet(
+        "snvs.parquet",
+        compression="snappy",
     )
+
 
 if __name__ == "__main__":
     main()
