@@ -16,3 +16,6 @@ EMBEDDING_GENERATION.md
 
 snvs_full.parquet
 snvs_filtered.parquet
+
+.ruff_cache
+analysis/
